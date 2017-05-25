@@ -1,0 +1,17 @@
+{
+  "name": "lodash-pack",
+  "version": "1.0.0",
+  "main": "index.js",
+  "license": "MIT",
+  "dependencies": {
+    "babel": "^6.23.0",
+    "babel-cli": "^6.24.1",
+    "babel-loader": "^7.0.0",
+    "babel-plugin-lodash": "^3.2.11",
+    "babel-preset-env": "^1.5.1",
+    "lodash": "^4.17.4",
+    "lodash-cli": "^4.17.4",
+    "lodash-webpack-plugin": "^0.11.4",
+    "webpack": "^2.6.0"
+  }
+}
