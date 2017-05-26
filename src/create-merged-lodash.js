@@ -29,6 +29,11 @@ function transformModuleToVar(modulePath) {
     const code = fs.readFileSync(modulePath, 'utf8');
     const ast = babylon.parse(code);
     const dependencies = [];
+    const isExportsAssign = (assignmentNode) => {
+        const { left } = assignmentNode;
+        return (left.type === 'MemberExpression' && left.object.type === 'Identifier' && left.object.name === 'module')
+            || (left.type === 'Identifier' && left.name === 'exports');
+    }
 
     traverse(ast, {
         Program(path) {
@@ -37,40 +42,45 @@ function transformModuleToVar(modulePath) {
             ];
         },
 
-        CallExpression(path) {
-            const { node, parent } = path;
-            if (node.callee.name === 'require') {
-                const { arguments: args } = node;
-                const isValidRequire = (args.length === 1 && args[0].type === 'StringLiteral')
-                    && (parent.type === 'VariableDeclarator' && parent.id.type === 'Identifier');
-                if (isValidRequire) {
-                    const importedModulePath = args[0].value;
-                    const tgtVarName = importedModulePath.replace(/^(.*[\\\/])*/, '');
-                    dependencies.push(require.resolve(_path.resolve(_path.dirname(modulePath), importedModulePath)));
-                    if (parent.id.name === tgtVarName) {
-                        path.parentPath.remove();
+        AssignmentExpression: {
+            exit(path) {
+                if (isExportsAssign(path.node)) {
+                    if (path.parent.type === 'ExpressionStatement') {
+                        path.parentPath.replaceWith(
+                            t.returnStatement(path.node.right)
+                        );
                     } else {
-                        parent.init = t.identifier(tgtVarName);
+                        throw new Error('module exports should be inside an ExpressionStatement');
                     }
-                } else {
-                    throw new Error(`Unknown require call expression: require(${JSON.stringify(args)})`);
                 }
             }
         },
 
-        AssignmentExpression(path) {
-            const { left } = path.node;
-            const isExportsAssign =
-                (left.type === 'MemberExpression' && left.object.type === 'Identifier' && left.object.name === 'module')
-                || (left.type === 'Identifier' && left.name === 'exports');
-            if (isExportsAssign) {
-                if (path.parent.type === 'ExpressionStatement') {
-                    path.parentPath.replaceWith(
-                        t.returnStatement(path.node.right)
-                    );
-                } else {
-                    throw new Error('module exports should be inside an ExpressionStatement');
+        CallExpression(path) {
+            const { node, parent } = path;
+            if (node.callee.type === 'Identifier' && node.callee.name === 'require') {
+                const { arguments: args } = node;
+                if (args.length === 1 && args[0].type === 'StringLiteral') {
+                    const importedModulePath = args[0].value;
+                    const tgtVarName = importedModulePath.replace(/^(.*[\\\/])*/, '');
+                    dependencies.push(require.resolve(_path.resolve(_path.dirname(modulePath), importedModulePath)));
+                    if (parent.type === 'VariableDeclarator' && parent.id.type === 'Identifier') {
+                        // require for declaration
+                        if (parent.id.name === tgtVarName) {
+                            path.parentPath.remove();
+                        } else {
+                            parent.init = t.identifier(tgtVarName);
+                        }
+                        return;
+                    } else if (parent.type === 'AssignmentExpression') {
+                        if (parent.left.type === 'Identifier' && parent.left.name === tgtVarName) {
+                            throw new Error('Conflict assignment with require');
+                        }
+                        parent.right = t.identifier(tgtVarName);
+                        return;
+                    }
                 }
+                throw new Error(`Unknown require call expression: require(${JSON.stringify(args)})`);
             }
         }
     });
@@ -188,3 +198,6 @@ function createMergedLodash(includedModules, outputFile = _path.resolve(__dirnam
 }
 
 module.exports = createMergedLodash;
+
+// test code
+createMergedLodash(require('./lodash-modules').full);
