@@ -83,7 +83,7 @@ function transformModuleToVar(modulePath) {
     };
 }
 
-function createMergedLodash(includedModules) {
+function createMergedLodash(includedModules, outputFile = _path.resolve(__dirname, 'out.js')) {
     const includedModulePaths = includedModules.map(mod => require.resolve(_path.resolve(lodashModuleBasePath, mod)));
     const moduleVars = [];
     const moduleVarMap = {};
@@ -184,7 +184,7 @@ function createMergedLodash(includedModules) {
         })
         .concat(generator(exportAST, {}).code)
         .join('\n\n');
-    fs.writeFileSync('out.js', finalCode);
+    fs.writeFileSync(outputFile, finalCode);
 }
 
 module.exports = createMergedLodash;
