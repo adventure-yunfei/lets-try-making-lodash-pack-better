@@ -21,7 +21,24 @@ function createExportVar(id, body) {
 
 function inferLodashModuleVarName(modulePath) {
     const relativePath = _path.relative(lodashModuleBasePath, modulePath);
-    return relativePath.replace('.js', '').replace(/[\\\/]/g, '_');
+    return relativePath.replace('.js', '').replace(/[\\/]/g, '_');
+}
+
+function uniqLiteralVars(literalVars) {
+    const result = [];
+    const idMap = {};
+    literalVars.forEach((literalVar) => {
+        const varName = literalVar.id.name;
+        if (idMap[varName]) {
+            if (idMap[varName].init.value !== literalVar.init.value) {
+                throw new Error(`Literal variable declarator conflict: ${varName}`);
+            }
+        } else {
+            result.push(literalVar);
+            idMap[varName] = literalVar;
+        }
+    });
+    return result;
 }
 
 function transformModuleToVar(modulePath) {
@@ -29,19 +46,28 @@ function transformModuleToVar(modulePath) {
     const code = fs.readFileSync(modulePath, 'utf8');
     const ast = babylon.parse(code);
     const dependencies = [];
+    const literalVars = [];
+    let rootScope = null;
     const isExportsAssign = (assignmentNode) => {
         const { left } = assignmentNode;
         return (left.type === 'MemberExpression' && left.object.type === 'Identifier' && left.object.name === 'module')
             || (left.type === 'Identifier' && left.name === 'exports');
-    }
+    };
 
     traverse(ast, {
-        Program(path) {
-            path.node.body = [
-                createExportVar(moduleVar, path.node.body)
-            ];
+        // Wrap module with IIFE func to create namespace
+        Program: {
+            enter(path) {
+                rootScope = path.scope;
+            },
+            exit(path) {
+                path.node.body = [
+                    createExportVar(moduleVar, path.node.body)
+                ];
+            }
         },
 
+        // Replace "exports" with "return"
         AssignmentExpression: {
             exit(path) {
                 if (isExportsAssign(path.node)) {
@@ -56,6 +82,7 @@ function transformModuleToVar(modulePath) {
             }
         },
 
+        // Replace "require" with namespace variable
         CallExpression(path) {
             const { node, parent } = path;
             if (node.callee.type === 'Identifier' && node.callee.name === 'require') {
@@ -63,7 +90,9 @@ function transformModuleToVar(modulePath) {
                 if (args.length === 1 && args[0].type === 'StringLiteral') {
                     const importedModulePath = args[0].value;
                     const tgtVarName = importedModulePath.replace(/^(.*[\\\/])*/, '');
-                    dependencies.push(require.resolve(_path.resolve(_path.dirname(modulePath), importedModulePath)));
+                    dependencies.push(require.resolve(
+                        _path.resolve(_path.dirname(modulePath), importedModulePath))
+                    );
                     if (parent.type === 'VariableDeclarator' && parent.id.type === 'Identifier') {
                         // require for declaration
                         if (parent.id.name === tgtVarName) {
@@ -82,6 +111,19 @@ function transformModuleToVar(modulePath) {
                 }
                 throw new Error(`Unknown require call expression: require(${JSON.stringify(args)})`);
             }
+        },
+
+        // Extract literal declaration
+        VariableDeclarator(path) {
+            const { node } = path;
+            if (path.scope === rootScope && node.id.type === 'Identifier') {
+                const initType = node.init && node.init.type;
+                if (initType === 'StringLiteral' || initType === 'NumericLiteral'
+                    || initType === 'BooleanLiteral') {
+                    literalVars.push(node);
+                    path.remove();
+                }
+            }
         }
     });
 
@@ -89,12 +131,14 @@ function transformModuleToVar(modulePath) {
         modulePath,
         ast,
         dependencies,
+        literalVars,
         sourceCode: code
     };
 }
 
 function createMergedLodash(includedModules, outputFile = _path.resolve(__dirname, 'out.js')) {
-    const includedModulePaths = includedModules.map(mod => require.resolve(_path.resolve(lodashModuleBasePath, mod)));
+    const includedModulePaths = includedModules.map(mod =>
+        require.resolve(_path.resolve(lodashModuleBasePath, mod)));
     const moduleVars = [];
     const moduleVarMap = {};
 
@@ -151,49 +195,58 @@ function createMergedLodash(includedModules, outputFile = _path.resolve(__dirnam
 
     // Finally output them with only one module
     const exportedLodashVar = '__EXPORTED_LODASH__';
-    const exportAST = t.file(
+    const literalVars = moduleVars.reduce((acc, modVar) => acc.concat(modVar.literalVars), []);
+    const literalDeclareAST = t.file(
         t.program([
-            t.variableDeclaration('var', [
-                t.variableDeclarator(
-                    t.identifier(exportedLodashVar),
-                    t.objectExpression([])
+            t.variableDeclaration('var', uniqLiteralVars(literalVars))
+        ])
+    );
+    const exportAST = t.file(
+        t.program(
+            [
+                t.variableDeclaration('var', [
+                    t.variableDeclarator(
+                        t.identifier(exportedLodashVar),
+                        t.objectExpression([])
+                    )
+                ])
+            ].concat(includedModulePaths.map((modPath) => {
+                const modVarName = inferLodashModuleVarName(modPath);
+                return t.expressionStatement(
+                    t.assignmentExpression(
+                        '=',
+                        t.memberExpression(
+                            t.identifier(exportedLodashVar),
+                            t.identifier(modVarName)
+                        ),
+                        t.identifier(modVarName)
+                    )
+                );
+            })).concat([
+                t.expressionStatement(
+                    t.assignmentExpression(
+                        '=',
+                        t.memberExpression(
+                            t.identifier('module'),
+                            t.identifier('exports')
+                        ),
+                        t.identifier(exportedLodashVar)
+                    )
                 )
             ])
-        ].concat(includedModulePaths.map((modPath) => {
-            const modVarName = inferLodashModuleVarName(modPath);
-            return t.expressionStatement(
-                t.assignmentExpression(
-                    '=',
-                    t.memberExpression(
-                        t.identifier(exportedLodashVar),
-                        t.identifier(modVarName)
-                    ),
-                    t.identifier(modVarName)
-                )
-            );
-        }).concat([
-            t.expressionStatement(
-                t.assignmentExpression(
-                    '=',
-                    t.memberExpression(
-                        t.identifier('module'),
-                        t.identifier('exports')
-                    ),
-                    t.identifier(exportedLodashVar)
-                )
-            )
-        ]))),
+        ),
         [],
         []
     );
 
-    const finalCode = moduleVars
-        .map((modVar) => {
+    const finalCode = [
+        generator(literalDeclareAST, {}).code,
+        ...(moduleVars.map((modVar) => {
             const code = generator(modVar.ast, {}, modVar.sourceCode).code;
             return `/* lodash module: ${_path.relative(lodashModuleBasePath, modVar.modulePath)} */\n${code}`;
-        })
-        .concat(generator(exportAST, {}).code)
-        .join('\n\n');
+        })),
+        generator(exportAST, {}).code
+    ].join('\n\n');
     fs.writeFileSync(outputFile, finalCode);
 }
 
